@@ -1,4 +1,4 @@
-# PWR 电源控制——实现低功耗
+# PWR 电源控制——低功耗
 
 STM32微控制器广泛应用于各种嵌入式系统中，电源管理是其核心功能之一。有效的电源控制不仅可以延长电池寿命，还能提高系统的稳定性和可靠性。
 
@@ -9,27 +9,65 @@ STM32微控制器广泛应用于各种嵌入式系统中，电源管理是其核
 - 可编程电压监测器（PVD）可以监控VDD电源电压，当VDD下降到PVD阀值以下或上升到PVD阀值之上时，PVD会触发中断，用于执行紧急处理任务。
 - 低功耗模式包括睡眠模式（Sleep）、停机模式（Stop）和待机模式（Standby），可在系统空闲时，降低STM32的功耗，延长设备使用时间。
 
-## 二、电源监控器
+## 二、电源系统框图
+
+为方便进行电源管理，STM32把外设、内核等模块根据功能划分了供电区域，其内部电源区域划分见图：
+
+<img src="https://i-blog.csdnimg.cn/direct/704114e340bc43ab82d619443361f94b.png" alt="img" style="zoom:60%;" />
+
+从框图可知，STM32内部把电源分成了四个供电区域：
+
+- **VDDA供电区域（模拟供电）**
+  供电对象：A/D转换器（ADC）、温度传感器、复位模块、PLL锁相环
+
+  特点：模拟电路对电源噪声敏感，所以VDDA要单独供电，并且通过VREF+和VREF-提供参考电压
+
+- **VDD供电区域（数字供电）**
+  供电对象：I/O电路、待机电路（唤醒逻辑、IWDG独立看门狗）、电压调节器
+
+  特点：这是数字电路的主供电区域
+
+- **1.8V供电区域（内核供电）**
+  供电对象：CPU核心、存储器（SRAM/Flash）、内置数字外设
+
+  特点：这个区域的电不是直接从外部引脚来的，而是由电压调节器把VDD降压到1.8V供给的。你可以理解为：外部供3.3V，但CPU内核只吃1.8V的"细粮"
+
+- **后备供电区域（Backup Domain）**
+
+  供电对象：LSE 32.768KHz晶体振荡器、后备寄存器、RCC BDCR寄存器、RTC实时时钟。
+
+  VBAT用于备份区域电源，比如RTC、备份SRAM等，一旦主电源断开，VBAT可以为这些区域提供电源。
+
+  特点：这个区域比较特殊，它可以通过VBAT引脚接纽扣电池供电。也就是说，即使主电源VDD断电，只要VBAT有电，RTC和后备寄存器的数据就不会丢
+
+## 三、电源监控器
 
 > STM32芯片主要通过引脚 VDD 从外部获取电源，在它的内部具有电源监控器用于检测 VDD 的 电压，以实现复位功能及掉电紧急处理功能，保证系统可靠地运行。
 
-### 1. 上电复位与掉电复位 
-
-上电复位与掉电复位 (POR与PDR)
+### 1. 上电复位与掉电复位  (POR与PDR)
 
 当检测到 VDD 的电压低于阈值 VPOR 及 VPDR 时，无需外部电路辅助，STM32芯片会自动保持在复位状态，防止因电压不足强行工作而带来严重的后果。
 
-<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260828103127416.png" alt="image-20260828103127416" style="zoom:33%;" />
+<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260828103127416.png" alt="image-20260828103127416" style="zoom: 50%;" />
 
 上图所示，在刚开始电压低于 VPOR 时 (约 1.92V)，STM32 保持在上电复位状态 (POR，Power On Reset)，当 VDD 电压持续 上升至大于 VPOR 时，芯片开始正常运行，而在芯片正常运行的时候，当检测到 VDD 电压下降 至低于 VPDR 阈值 (约 1.88V)，会进入掉电复位状态 (PDR，Power Down Reset)。
 
 ### 2. 可编程电压检测器 PVD
 
-STM32还提供了可编程的电压监测器PVD，它也是实时检测VDD的电压，当检测到电压低于编程的VPVD阈值时，会向内核产生 一个PVD中断 (EXTI16 线中断) 以使内核在复位前进行紧急处理。该电压阈值可通过电源控制寄存器 PWR_CSR 设置。
+在嵌入式系统长期运行场景中，电源电压跌落是导致数据丢失、状态紊乱甚至硬件损坏的关键风险源。STM322的上电复位(POR)和掉电复位(PDR)机制虽能保障芯片在极端低压下强制重启，但其触发阈值(典型为1.8V-1.9V)已处于功能失效边缘。当VDD从标称3.3V持续下降至2.2V区间时，芯片仍可执行指令、访问SRAM、操作外设，但若未在此窗口期完成关键动作，一旦越过POR/PDR阈值，所有寄存器状态、RAM数据将瞬间归零，不可恢复。
+
+PVD(Programmable Voltage Detector)正是为解决这一“复位前黄金窗口”问题而生。它并非替代 POR/PDR，而是前置预警机制：允许工程师在电压尚未危及逻辑运行时，主动介入执行数据保护策略。典型应用场景包括：
+
+- 断电数据保存：将Flash中关键参数回写至备份域或外部非易失存储；
+- 安全关机流程：关闭高功耗外设(如Wi-Fi模块、电机驱动)、进入低功耗待机模式；
+- 故障日志记录：将最后有效状态、电压采样值、错误码写入环形缓冲区；
+- 电池电量分级告警：
+
+可编程电压监测器PVD，它也是实时检测VDD的电压，当检测到电压低于编程的VPVD阈值时，会向内核产生 一个PVD中断 (EXTI16 线中断) 以使内核在复位前进行紧急处理。该电压阈值可通过电源控制寄存器设置。
 
 PVD可配置8个等级，其中上升沿和下降沿分别表示类似图POR与PDR中VDD电压上升过程及下降过程的阈值。可使用库函数 `PWR_PVDLevelConfig()` 配置阈值等级。
 
-<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260828103534940.png" alt="image-20260828103534940" style="zoom: 25%;" />
+<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260828103534940.png" alt="image-20260828103534940" style="zoom: 33%;" />
 
 ```C
 //可编程电压检测器PVD初始化结构体
@@ -39,14 +77,14 @@ typedef struct
   uint32_t Mode;       //PVD触发模式
 }PWR_PVDTypeDef;
 
-
 PWR_PVDTypeDef pvdHandle;
+
 void PVD_Init(void) {
     pvdHandle.PVDLevel = PWR_PVDLEVEL_7;		// 设定阈值为约 2.9V（高阈值，适合 3.3V 系统）
     pvdHandle.Mode = PWR_PVD_MODE_IT_FALLING;	// 仅在电压跌落（低于 2.9V）时触发中断，用于紧急报警
     HAL_PWR_ConfigPVD(&pvdHandle);			   // 将配置写入寄存器
 
-    HAL_NVIC_SetPriority(PVD_IRQn, 0, 0);		// 使能PVD中断（在 NVIC 中使能）
+    HAL_NVIC_SetPriority(PVD_IRQn, 0, 0);		// 使能PVD中断（在NVIC中使能）
     HAL_NVIC_EnableIRQ(PVD_IRQn);
     
     HAL_PWR_EnablePVD();					  // 硬件上开启 PVD 功能
@@ -66,29 +104,19 @@ void HAL_PWR_PVDCallback(void) {
 
 
 
-## 三、电源系统框图
-
-为方便进行电源管理，STM32把外设、内核等模块根据功能划分了供电区域，其内部电源区域划分见图：
-
-<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260825094325115.png" alt="image-20260825094325115" style="zoom:40%;" />
-
-从框图可知，STM32的电源系统主要分为三类：数字电源、模拟电源、备份电源。
-
-- 模拟电源：VDDA用于模拟部分的电源，比如ADC。
-- 数字电源：VDD用于数字部分的电源，是其主电源。
-- 备份电源：VBAT用于备份区域电源，比如RTC、备份SRAM等，一旦主电源断开，VBAT可以为这些区域提供电源。
-
 ## 四、低功耗模式
 
 > 按功耗由高到低排列，STM32具有运行、睡眠、停止和待机四种工作模式。上电复位后 STM32 处于运行状态时，当内核不需要继续运行，就可以选择进入后面的三种低功耗模式降低功耗，这三种模式中，电源消耗不同、唤醒时间不同、唤醒源不同，用户需要根据应用需求，选择最佳的低功耗模式。三种低功耗的模式说明见表。
 >
-> <img src="https://i-blog.csdnimg.cn/blog_migrate/9ba63f34b434d02589ba07b4b91b7dbd.png" alt="img" style="zoom:50%;" />
+> <img src="https://i-blog.csdnimg.cn/blog_migrate/9ba63f34b434d02589ba07b4b91b7dbd.png" alt="img" style="zoom: 67%;" />
 >
 > <img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260825101606611.png" alt="image-20260825101606611" style="zoom:50%;" />
+>
+> <img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20261030133515750.png" alt="image-20261030133515750" style="zoom:50%;" />
 
 ### 1. 睡眠模式
 
-在睡眠模式中，仅关闭了内核时钟，内核停止运行，但其片上外设，CM3 核心的外设全都还照常运行。
+在睡眠模式中，仅关闭了内核时钟，内核CPU停止运行，但其片上外设，CM3 核心的外设全都还照常运行。
 
 有两种方式进入睡眠模式，进入方式决定了睡眠唤醒的方式，分别是WFI(wait for interrupt)和WFE(wait for event)，即由等待“中断”唤醒和由“事件”唤醒。
 
@@ -104,7 +132,7 @@ void HAL_PWR_PVDCallback(void) {
 HAL_PWR_EnterSLEEPMode()
 ```
 
-软件设计步骤
+**软件设计步骤**
 
 1. 进入睡眠模式前：执行必要的准备操作。
 2. 暂停SysTick中断：`HAL_SuspendTick()`。如果不暂停，SysTick中断会持续唤醒CPU。
@@ -113,6 +141,8 @@ HAL_PWR_EnterSLEEPMode()
 5. 继续执行：CPU从进入睡眠模式的下一条指令开始继续运行。
 
 ### 2. 停止模式
+
+停止模式下，CPU和大部分外设都停止运行，只有少数低功耗外设保持工作状态。可以通过外部中断或RTC唤醒。
 
 在停止模式中，进一步关闭了其它所有的时钟，于是所有的外设都停止了工作，但由于其1.8V区域的部分电源没有关闭， 还保留了内核的寄存器、内存的信息，所以从停止模式唤醒，并重新开启时钟后，还可以从上次停止处继续执行代码。 
 
@@ -136,15 +166,15 @@ HAL_PWR_EnterSLEEPMode()
    - 重新配置系统时钟：这是最关键的一步！停止模式唤醒后，系统时钟会默认切换到 HSI (高速内部时钟)。如果之前使用的是HSE或PLL，必须重新配置才能恢复到全速运行状态。
    - 重新初始化外设：部分外设（如ADC、DMA）在停止模式下可能断电，唤醒后需要重新初始化。
 
-
-
 ### 3. 待机模式
+
+待机模式下，CPU、外设和大部分内存都停止供电，只有备份域（如RTC和备份寄存器）保持供电。可以通过外部复位、RTC闹钟或WKUP引脚唤醒。
 
 待机模式，除了关闭所有的时钟，还把1.8V区域的电源也完全关闭了，也就是说，从待机模式唤醒后，由于没有之前代码的运行记录，只能对芯片复位，重新检测boot条件，从头开始执行程序。
 
 它有四种唤醒方式，分别是WKUP(PA0)引脚的上升沿，RTC闹钟事件，NRST引脚的复位和IWDG(独立看门狗)复位。
 
-<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/1ce6f9d7393d3f499e5d9cfa7a311af9.png" alt="img" style="zoom: 50%;" />
+<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/1ce6f9d7393d3f499e5d9cfa7a311af9.png" alt="img" style="zoom: 67%;" />
 
 ```C
 HAL库进入待机模式的函数 `HAL_PWR_EnterSTANDBYMode()`
@@ -164,7 +194,7 @@ HAL库进入待机模式的函数 `HAL_PWR_EnterSTANDBYMode()`
    - 不需要重新配置系统时钟（复位后默认使用HSI，`SystemClock_Config()`会在初始化阶段被调用）。
    - 必须检查复位标志是否为待机唤醒，以执行不同的初始化逻辑。调用`__HAL_PWR_GET_FLAG()`。
 
-三大低功耗模式对比
+### 4. 三大低功耗模式对比
 
 | 特性         | 睡眠模式 (Sleep)     | 停止模式 (Stop)                        | 待机模式 (Standby)        |
 | :----------- | :------------------- | :------------------------------------- | :------------------------ |
@@ -176,11 +206,11 @@ HAL库进入待机模式的函数 `HAL_PWR_EnterSTANDBYMode()`
 | 唤醒时间     | 极快 (无延时)        | 较快 (< 6μs)                           | 最慢 (相当于系统复位)     |
 | 唤醒后动作   | 立即执行下一条指令   | 继续执行后续代码，需重新配置时钟       | 系统复位，程序从头执行    |
 
+
+
 ## 五、PWR实验
 
 ### PVD电源监控实验
-
-软件设计
 
 1. 初始化PVD中断；
 2. 设置PVD电压监控等级并使能PVD；
@@ -188,15 +218,9 @@ HAL库进入待机模式的函数 `HAL_PWR_EnterSTANDBYMode()`
 
 ### 睡眠模式实验
 
-软件设计
-
 1. 初始化用于唤醒的中断按键；
 2. 进入睡眠状态；
 3. 使用按键中断唤醒芯片；
-
-代码分析
-
-main函数
 
 ```c
  /**
@@ -261,10 +285,6 @@ void KEY1_IRQHandler(void)
 
 ### 停止模式实验
 
-硬件设计
-
-软件设计
-
 1. 初始化用于唤醒的中断按键；
 2. 选择电压调节器的工作模式并进入停止状态；
 3. 使用按键中断唤醒芯片；
@@ -273,8 +293,6 @@ void KEY1_IRQHandler(void)
 <img src="C:/Users/acer/AppData/Roaming/Typora/typora-user-images/image-20260809162315502.png" alt="image-20260809162315502" style="zoom:55%;" />
 
 ### 待机模式实验
-
-软件设计
 
 1. 清除WUF标志位；
 2. 使能WKUP唤醒功能；

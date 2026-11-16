@@ -1,29 +1,27 @@
-# DMA 直接存储器存取
+# DMA 直接存储器访问
 
-DMA\(Direct Memory Access\)—直接存储器存取，是单片机的一个外设，主要功能是用来搬数据，但是不需要占用CPU， 即传输数据的时候，CPU可以干其他的事情，好像是多线程一样。数据传输支持从外设到存储器或者存储器到存储器， 这里的存储器可以是SRAM或者是FLASH。
+DMA（Direct Memory Access，直接内存访问）是STM32 微控制器中一种高效的数据传输机制。它允许外设与内存之间直接传输数据，而无需CPU的干预。这种机制可以显著提高系统的性能，尤其是在需要大量数据传输的场景中。这里的存储器可以是SRAM或者是FLASH。
 
-- DMA（Direct Memory Access）直接存储器存取
+- DMA直接内存访问。即必须有一方是内存：内存-->外设、外设-->内存、内存-->内存。
 
-- DMA可支持外设（外设寄存器）和存储器（SRAM和Flash）、存储器和存储器之间的高速数据传输（数据从一个地址空间复制到另一个地址空间）。无须CPU干预，节省了CPU的资源
+- 无须CPU干预，节省了CPU的资源
 
 - 2个DMA控制器，共12个独立可配置的通道（请求）： DMA1（7个通道）， DMA2（5个通道），每个通道专门用来管理来自于一个或多个外设对存储器访问的请求。
 
-- 每个通道都支持软件触发和特定硬件触发。
+- 每个通道都支持软件和特定硬件触发。
 
-  > 如果DMA进行的是存储器到存储器的数据转运，那就需要软件触发，软件触发之后DMA就会一股脑地把这批数据以最快的速度全部转运完成。
-  > 如果DMA进行的是外设到存储器的数据转运，就不能一股脑了，因为外设的数据是有一定时机的，这时要用硬件触发，比如转运ADC的数据，那就得ADC每个通道AD转换完成后，硬件触发一次之后再DMA转运，触发一次转运一次，这样数据才是正确的。
 
 ## DMA框图
 
 DMA控制器独立于内核，属于一个单独的外设，结构比较简单。
 
-- DMA总线用于访问各个存储器
+- DMA总线用于访问各个存储器。（拥有访问权）
 - DMA内部的多个通道可以进行独立的数据转运。
 - 仲裁器用于调度各个通道防止发生冲突。
 - AHB从设备用于配置DMA参数。
 - DMA请求用于硬件触发DMA的数据转运。 
 
-<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260813090014313.png" alt="image-20260813090014313" style="zoom: 33%;" />
+<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image28.png" alt="图 21‑1 DMA框图" style="zoom:80%;" />
 
 ![img](https://gitee.com/yb_wang6/typora_imgs/raw/master/img/de801d9fae114310aeb661cc3fc601e8.png)
 
@@ -50,29 +48,45 @@ DMA控制器独立于内核，属于一个单独的外设，结构比较简单�
 5. 触发机制，主要配置其使能或者失能，使能软件触发，失能硬件触发。
    - 注意：软件触发不能和循环一起使用。因为软件触发就是想将传输计数器清零，但是循环模式清零后会进行自动重装，因此不能一起使用。
 
-## DMA请求-触发源选择
+### DMA请求-触发源选择
 
-对于硬件触发需要根据不同的触发源，选择不同的通道，软件触发就随便了。
+对于硬件触发需要根据不同的触发源选择不同的通道，软件触发就随便了。
 
-<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260813152757584.png" alt="image-20260813152757584" style="zoom: 33%;" />
+<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260813152757584.png" alt="image-20260813152757584" style="zoom: 50%;" />
 
 如果外设要想通过DMA来传输数据，必须先给DMA控制器发送DMA请求，DMA收到请求信号之后，控制器会给外设一个应答信号， 当外设应答后且DMA控制器收到应答信号之后，就会启动DMA的传输，直到传输完毕。
 
 DMA有DMA1和DMA2两个控制器，DMA1有7个通道，DMA2有5个通道，不同的DMA控制器的通道对应着不同的外设请求， 具体见DMA请求映像表。
 
-<img src="https://gitee.com/yb_wang6/typora_imgs/raw/master/img/image-20260813095029414.png" alt="image-20260813095029414" style="zoom:40%;" />
+### DMA通道
 
-### 仲裁器
+DMA通道是DMA控制器中的一个逻辑单元，负责管理特定外设与内存之间的数据传输。每个DMA通道可以配置为处理特定的外设请求，并支持多种传输模式。在STM32中，DMA通道的主要功能包括：
 
-当多个DMA请求同时到来时，意味着有先后响应处理的顺序问题，这个就由仲裁器管理。STM32的DMA仲裁器处理多请求时，其优先级判定分为两个明确的阶段：
+- 数据传输方向：内存到外设、外设到内存或内存到内存。
+- 传输模式：单次传输、循环传输等。
+- 数据宽度：8位、16位或32位。
+- 优先级：多个DMA通道可以配置不同的优先级。
+
+### DMA优先级
+
+当多个DMA请求同时到来时，由仲裁器管理响应处理的顺序问题。STM32的DMA仲裁器处理多请求时，其优先级判定分为两个明确的阶段：
 
 - 软件优先级：有非常高、高、中和低4个等级，可在程序中配置。每个数据流或通道都可以被设置为四个等级之一。
-- 硬件优先级：当两个或更多请求的软件优先级相同时，仲裁器会转而依靠硬件规则来裁决：通道编号越低优先权越高，比如通道0高于通道1。
-- 在大容量产品和互联型产品中， DMA1控制器优先级高于DMA2控制器。
+- 硬件优先级：当多个请求的软件优先级相同时，仲裁器会转而依靠硬件规则来裁决：通道编号越低优先权越高，比如通道0高于通道1。
 
-## DMA初始化结构体
+### DMA中断
 
-HAL库函数对每个外设都建立了一个初始化结构体xxx_InitTypeDef(xxx为外设名称)，结构体成员用于设置外设工作参数，并由HAL库函数xxx_Init()调用这些设定参数进入设置外设相应的寄存器，达到配置外设工作环境的目的。
+DMA中断是在DMA传输完成或发生错误时触发的中断信号，用于通知CPU处理相关事件。通过配置DMA中断，开发者可以在数据传输完成后立即执行相关操作，而不需要轮询DMA状态寄存器。DMA中断通常用于以下两种情况：
+
+- 传输完成中断：当DMA传输完成时，触发中断以通知CPU。
+
+- 传输错误中断：当DMA传输过程中发生错误时，触发中断以通知CPU。
+
+## DMA相关结构体
+
+1. DMA初始化结构体
+
+   HAL库函数对每个外设都建立了一个初始化结构体xxx_InitTypeDef(xxx为外设名称)，结构体成员用于设置外设工作参数，并由HAL库函数xxx_Init()调用这些设定参数进入设置外设相应的寄存器，达到配置外设工作环境的目的。
 
 ```C
 //DMA_InitTypeDef初始化结构体
@@ -91,25 +105,18 @@ typedef struct {
 #define DMA1_BASE             (AHBPERIPH_BASE + 0x00000000UL)
 #define DMA1_Channel1_BASE    (AHBPERIPH_BASE + 0x00000008UL)
 #define DMA1_Channel2_BASE    (AHBPERIPH_BASE + 0x0000001CUL)
-#define DMA1_Channel3_BASE    (AHBPERIPH_BASE + 0x00000030UL)
-#define DMA1_Channel4_BASE    (AHBPERIPH_BASE + 0x00000044UL)
-#define DMA1_Channel5_BASE    (AHBPERIPH_BASE + 0x00000058UL)
-#define DMA1_Channel6_BASE    (AHBPERIPH_BASE + 0x0000006CUL)
-#define DMA1_Channel7_BASE    (AHBPERIPH_BASE + 0x00000080UL)
+......
 
 #define DMA2_BASE             (AHBPERIPH_BASE + 0x00000400UL)
 #define DMA2_Channel1_BASE    (AHBPERIPH_BASE + 0x00000408UL)
 #define DMA2_Channel2_BASE    (AHBPERIPH_BASE + 0x0000041CUL)
-#define DMA2_Channel3_BASE    (AHBPERIPH_BASE + 0x00000430UL)
-#define DMA2_Channel4_BASE    (AHBPERIPH_BASE + 0x00000444UL)
-#define DMA2_Channel5_BASE    (AHBPERIPH_BASE + 0x00000458UL)
-
+......
 
 typedef struct __DMA_HandleTypeDef
 {
-  DMA_Stream_TypeDef         *Instance;        //DMA 通道/数据流的寄存器基地址，用于选择硬件资源（例如 DMA1_Stream0）
+  DMA_Stream_TypeDef         *Instance;        //DMA 通道/数据流的寄存器基地址，用于选择硬件资源
   DMA_InitTypeDef            Init;             //DMA 传输的核心配置参数
-  HAL_LockTypeDef            Lock;             //用于实现资源锁，防止在中断和线程上下文中对同一个 DMA 句柄进行并发操作，保证线程安全。
+  HAL_LockTypeDef            Lock;             //用于实现资源锁，保证线程安全。
   __IO HAL_DMA_StateTypeDef  State;            //当前 DMA 通道的状态，供 HAL 库内部进行状态管理
   void                       *Parent;          //指向拥有此DMA句柄的外设句柄，用于在回调函数中反查是哪个外设发起的传输。
     
@@ -125,30 +132,15 @@ typedef struct __DMA_HandleTypeDef
 } DMA_HandleTypeDef;
 
 
-//DMA状态
-typedef enum
-{
-  HAL_OK       = 0x00U,
-  HAL_ERROR    = 0x01U,
-  HAL_BUSY     = 0x02U,
-  HAL_TIMEOUT  = 0x03U
-} HAL_StatusTypeDef;
-
-
 // 完成DMA数据流参数配置
 HAL_DMA_Init(DMA_HandleTypeDef *DMA_Handle);
-
 // 启动DMA数据流传输
-HAL_DMA_Start();
+HAL_DMA_Start();	// 启动DMA数据流传输
 ```
 
 ## 实验1：DMA存储器到存储器
 
 存储器到存储器模式可以实现数据在两个内存的快速拷贝。
-
-### 硬件设计
-
-DMA存储器到存储器实验不需要其他硬件要求，可只用到RGB彩色灯用于指示程序状态。
 
 ### 软件设计
 
